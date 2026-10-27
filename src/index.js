@@ -68,31 +68,58 @@ function extractVideoId(targetUrl) {
 
 async function resolveRedirects(targetUrl) {
   let current = targetUrl;
-  const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-  if (/fb\.watch|facebook\.com\/share/i.test(current)) {
+  if (!/fb\.watch|facebook\.com\/share/i.test(current)) {
+    return current;
+  }
+
+  const testUas = [
+    "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+    "curl/8.5.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+  ];
+
+  for (const ua of testUas) {
     try {
+      let temp = current;
       for (let i = 0; i < 5; i++) {
-        const res = await fetch(current, {
+        const res = await fetch(temp, {
           method: "GET",
           redirect: "manual",
-          headers: { "User-Agent": ua }
+          headers: {
+            "User-Agent": ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+          }
         });
+
         if ([301, 302, 303, 307, 308].includes(res.status)) {
           const loc = res.headers.get("location");
           if (loc) {
-            current = new URL(loc, current).toString();
-            if (/\/videos\/|\/reel\/|\/watch\//.test(current)) break;
+            temp = new URL(loc, temp).toString();
+            const directMatch = temp.match(/(https?:\/\/(?:www\.)?facebook\.com\/(?:reel|videos|watch\/\?v=)\/[0-9]+)/i);
+            if (directMatch) return directMatch[1] + "/";
             continue;
           }
         }
-        if (res.url && res.url !== current) {
-          current = res.url;
+
+        if (res.status === 200) {
+          const html = await res.text();
+          const ogUrl = html.match(/property="og:url"\s+content="([^"]+)"/i)
+            || html.match(/rel="canonical"\s+href="([^"]+)"/i)
+            || html.match(/"video_id":"(\d+)"/i);
+          if (ogUrl) {
+            const matchedVal = ogUrl[1];
+            if (/^\d+$/.test(matchedVal)) return `https://www.facebook.com/watch/?v=${matchedVal}`;
+            return matchedVal.split("?")[0];
+          }
         }
         break;
       }
-    } catch {
-      return targetUrl;
-    }
+
+      const idMatch = temp.match(/\/(?:reel|videos)\/(\d+)/i) || temp.match(/[?&]v=(\d+)/i);
+      if (idMatch) {
+        return `https://www.facebook.com/reel/${idMatch[1]}/`;
+      }
+    } catch {}
   }
   return current;
 }
@@ -117,9 +144,9 @@ async function probeContentLength(url) {
   return null;
 }
 
-async function fetchPluginEngine(videoUrl) {
+async function fetchPluginUrl(candidateUrl) {
   try {
-    const pluginUrl = `https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(videoUrl)}`;
+    const pluginUrl = `https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(candidateUrl)}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 12000);
     const res = await fetch(pluginUrl, {
@@ -156,41 +183,64 @@ async function fetchPluginEngine(videoUrl) {
   }
 }
 
-async function fetchPrexzyEngine(videoUrl) {
-  try {
-    const target = `https://prexzyapis.com/download/aio?url=${encodeURIComponent(videoUrl)}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 12000);
-    const res = await fetch(target, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    if (!res.ok) return null;
-    const d = await res.json();
-    if (!d || !d.data) return null;
+async function fetchPluginEngine(videoUrl) {
+  const primary = await fetchPluginUrl(videoUrl);
+  if (primary) return primary;
 
-    const data = d.data;
-    const medias = data.medias || [];
-    const hdMedia = medias.find(m => String(m.quality).toUpperCase() === "HD");
-    const sdMedia = medias.find(m => String(m.quality).toUpperCase() === "SD") || medias[0];
-
-    const hd = cleanFbUrl(hdMedia?.url);
-    const sd = cleanFbUrl(sdMedia?.url);
-
-    if (!hd && !sd) return null;
-
-    return {
-      status: "active",
-      host: "prexzyapis.com",
-      title: data.title || "",
-      duration: data.duration ? Math.round(data.duration / 1000) : 0,
-      hd_url: hd,
-      sd_url: sd
-    };
-  } catch {
-    return null;
+  const videoId = extractVideoId(videoUrl);
+  if (videoId) {
+    const altWatch = await fetchPluginUrl(`https://www.facebook.com/watch/?v=${videoId}`);
+    if (altWatch) return altWatch;
+    const altReel = await fetchPluginUrl(`https://www.facebook.com/reel/${videoId}/`);
+    if (altReel) return altReel;
   }
+
+  return null;
+}
+
+async function fetchPrexzyEngine(videoUrl) {
+  const videoId = extractVideoId(videoUrl);
+  const candidates = [videoUrl];
+  if (videoId) {
+    candidates.push(`https://www.facebook.com/watch/?v=${videoId}`);
+    candidates.push(`https://www.facebook.com/reel/${videoId}/`);
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const target = `https://prexzyapis.com/download/aio?url=${encodeURIComponent(candidate)}`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 12000);
+      const res = await fetch(target, {
+        headers: { "User-Agent": "Mozilla/5.0" },
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const d = await res.json();
+      if (!d || !d.data) continue;
+
+      const data = d.data;
+      const medias = data.medias || [];
+      const hdMedia = medias.find(m => String(m.quality).toUpperCase() === "HD");
+      const sdMedia = medias.find(m => String(m.quality).toUpperCase() === "SD") || medias[0];
+
+      const hd = cleanFbUrl(hdMedia?.url);
+      const sd = cleanFbUrl(sdMedia?.url);
+
+      if (!hd && !sd) continue;
+
+      return {
+        status: "active",
+        host: "prexzyapis.com",
+        title: data.title || "",
+        duration: data.duration ? Math.round(data.duration / 1000) : 0,
+        hd_url: hd,
+        sd_url: sd
+      };
+    } catch {}
+  }
+  return null;
 }
 
 async function fetchCobaltEngine(videoUrl) {
@@ -199,33 +249,42 @@ async function fetchCobaltEngine(videoUrl) {
     "https://cobalt.kwiatekm.tokyo/"
   ];
 
+  const videoId = extractVideoId(videoUrl);
+  const candidates = [videoUrl];
+  if (videoId) {
+    candidates.push(`https://www.facebook.com/watch/?v=${videoId}`);
+    candidates.push(`https://www.facebook.com/reel/${videoId}/`);
+  }
+
   for (const inst of instances) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 9000);
-      const res = await fetch(inst, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json",
-          "User-Agent": "Mozilla/5.0"
-        },
-        body: JSON.stringify({ url: videoUrl }),
-        signal: controller.signal
-      });
-      clearTimeout(timer);
-      if (!res.ok) continue;
-      const d = await res.json();
-      const streamUrl = cleanFbUrl(d.url);
-      if (streamUrl) {
-        return {
-          status: "active",
-          host: new URL(inst).hostname,
-          url: streamUrl,
-          filename: d.filename || null
-        };
-      }
-    } catch {}
+    for (const cand of candidates) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 9000);
+        const res = await fetch(inst, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0"
+          },
+          body: JSON.stringify({ url: cand }),
+          signal: controller.signal
+        });
+        clearTimeout(timer);
+        if (!res.ok) continue;
+        const d = await res.json();
+        const streamUrl = cleanFbUrl(d.url);
+        if (streamUrl) {
+          return {
+            status: "active",
+            host: new URL(inst).hostname,
+            url: streamUrl,
+            filename: d.filename || null
+          };
+        }
+      } catch {}
+    }
   }
   return null;
 }
@@ -236,9 +295,8 @@ async function fetchWebFallback(videoUrl) {
     const timer = setTimeout(() => controller.abort(), 10000);
     const res = await fetch(videoUrl, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9"
+        "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
       },
       signal: controller.signal
     });
@@ -533,7 +591,7 @@ export default {
       return json({
         status: "online",
         service: "Facebook Video & Reels Scraper API",
-        version: "1.0.0",
+        version: "1.1.0",
         limits: {
           max_download_size: MAX_DOWNLOAD_BYTES,
           max_download_size_formatted: "650 MB"
