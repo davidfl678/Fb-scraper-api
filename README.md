@@ -4,10 +4,6 @@
   </a>
 </p>
 
-<p align="center">
-  <img src="" width="96" height="96" alt="Facebook Logo" />
-</p>
-
 <h1 align="center">📘 Facebook Video & Reels Scraper API</h1>
 
 <p align="center">
