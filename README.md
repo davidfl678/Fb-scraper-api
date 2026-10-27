@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://upload.wikimedia.org/wikipedia/commons/b/b9/2023_Facebook_icon.svg" width="96" height="96" alt="Facebook Logo" />
+  <img src="" width="96" height="96" alt="Facebook Logo" />
 </p>
 
 <h1 align="center">📘 Facebook Video & Reels Scraper API</h1>
